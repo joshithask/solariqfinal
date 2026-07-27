@@ -1,0 +1,73 @@
+"""
+report_gen.py
+
+Generates a plain-language sustainability report from the computed roof +
+solar numbers using the Anthropic API. This is the "Generative AI" layer
+of the pipeline described in the pitch deck.
+"""
+
+import os
+from anthropic import Anthropic
+
+_client = None
+
+
+def _get_client() -> Anthropic:
+    global _client
+    if _client is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY not set. Add it to your .env file "
+                "(see .env.example)."
+            )
+        _client = Anthropic(api_key=api_key)
+    return _client
+
+
+FALLBACK_TEMPLATE = (
+    "Your roof has about {usable_area} m² of usable space, enough for a "
+    "{capacity} kW solar system. Based on local sunlight levels, this "
+    "could generate roughly {generation} kWh per year — saving around "
+    "₹{savings} annually and cutting about {co2} kg of CO₂ emissions. "
+    "Installing solar here looks like a strong, financially sound step "
+    "toward energy independence."
+)
+
+
+def generate_report(roof_data: dict, solar_data: dict) -> str:
+    """
+    Calls Claude to turn the raw numbers into a short, homeowner-friendly
+    report. Falls back to a template if no API key is configured, so the
+    rest of the app still works in local/offline demos.
+    """
+    prompt = f"""You are writing a short rooftop solar feasibility report for a
+homeowner in India. Use the data below. Be concrete, encouraging, and easy
+to understand for someone with no technical background. Keep it to about
+150 words, plain prose (no headers, no markdown), and end with a one-line
+recommendation.
+
+Data:
+- Usable roof area: {roof_data['usable_roof_area_m2']} m²
+- Estimated solar capacity: {solar_data['estimated_capacity_kw']} kW
+- Estimated annual generation: {solar_data['annual_generation_kwh']} kWh
+- Estimated annual savings: ₹{solar_data['annual_savings_rs']}
+- Estimated annual CO2 reduction: {solar_data['annual_co2_reduction_kg']} kg
+"""
+
+    try:
+        client = _get_client()
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+    except Exception:
+        return FALLBACK_TEMPLATE.format(
+            usable_area=roof_data["usable_roof_area_m2"],
+            capacity=solar_data["estimated_capacity_kw"],
+            generation=int(solar_data["annual_generation_kwh"]),
+            savings=int(solar_data["annual_savings_rs"]),
+            co2=int(solar_data["annual_co2_reduction_kg"]),
+        )

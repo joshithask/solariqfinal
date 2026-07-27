@@ -1,0 +1,179 @@
+import { useState, useRef } from "react";
+import axios from "axios";
+
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+
+export default function App() {
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [coords, setCoords] = useState({ lat: "", lon: "" });
+  const [edgeLength, setEdgeLength] = useState("");
+  const [tariff, setTariff] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+  const fileInputRef = useRef(null);
+
+  function handleFileChange(e) {
+    const f = e.target.files[0];
+    if (!f) return;
+    setFile(f);
+    setPreview(URL.createObjectURL(f));
+    setResult(null);
+    setError(null);
+  }
+
+  function useMyLocation() {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setCoords({
+          lat: pos.coords.latitude.toFixed(4),
+          lon: pos.coords.longitude.toFixed(4),
+        });
+      },
+      () => setError("Could not get location. Enter coordinates manually.")
+    );
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!file || !coords.lat || !coords.lon) {
+      setError("Please upload a photo and provide a location.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    const formData = new FormData();
+    formData.append("image", file);
+    formData.append("latitude", coords.lat);
+    formData.append("longitude", coords.lon);
+    if (edgeLength) formData.append("known_edge_length_m", edgeLength);
+    if (tariff) formData.append("tariff_rs_per_kwh", tariff);
+
+    try {
+      const res = await axios.post(`${API_BASE}/analyze`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setResult(res.data);
+    } catch (err) {
+      setError(
+        err.response?.data?.detail ||
+          "Something went wrong analyzing the image. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="page">
+      <header className="header">
+        <h1>
+          SOLAR<span className="accent">-IQ</span>
+        </h1>
+        <p className="tagline">Smart rooftop analysis for a sustainable future</p>
+      </header>
+
+      <form className="card form" onSubmit={handleSubmit}>
+        <label className="dropzone" onClick={() => fileInputRef.current.click()}>
+          {preview ? (
+            <img src={preview} alt="Roof preview" className="preview" />
+          ) : (
+            <span>Click to upload a rooftop photo (JPG/PNG)</span>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/png"
+            onChange={handleFileChange}
+            hidden
+          />
+        </label>
+
+        <div className="row">
+          <input
+            type="text"
+            placeholder="Latitude"
+            value={coords.lat}
+            onChange={(e) => setCoords({ ...coords, lat: e.target.value })}
+          />
+          <input
+            type="text"
+            placeholder="Longitude"
+            value={coords.lon}
+            onChange={(e) => setCoords({ ...coords, lon: e.target.value })}
+          />
+          <button type="button" className="ghost-btn" onClick={useMyLocation}>
+            Use my location
+          </button>
+        </div>
+
+        <div className="row">
+          <input
+            type="number"
+            placeholder="Known roof width in meters (optional, improves accuracy)"
+            value={edgeLength}
+            onChange={(e) => setEdgeLength(e.target.value)}
+          />
+          <input
+            type="number"
+            placeholder="Electricity tariff ₹/kWh (optional, default 8)"
+            value={tariff}
+            onChange={(e) => setTariff(e.target.value)}
+          />
+        </div>
+
+        <button type="submit" className="primary-btn" disabled={loading}>
+          {loading ? "Analyzing roof…" : "Analyze My Roof"}
+        </button>
+
+        {error && <p className="error">{error}</p>}
+      </form>
+
+      {result && (
+        <section className="results">
+          <div className="card">
+            <h2>Roof Analysis</h2>
+            <div className="stat-grid">
+              <Stat label="Total roof area" value={`${result.roof_analysis.total_roof_area_m2} m²`} />
+              <Stat label="Obstacle area" value={`${result.roof_analysis.obstacle_area_m2} m²`} />
+              <Stat label="Usable area" value={`${result.roof_analysis.usable_roof_area_m2} m²`} />
+            </div>
+            <p className="fine-print">
+              Scale: {result.roof_analysis.scale_source === "user_provided"
+                ? "based on the roof width you provided"
+                : "estimated (no reference width provided)"}
+            </p>
+          </div>
+
+          <div className="card">
+            <h2>Solar Potential</h2>
+            <div className="stat-grid">
+              <Stat label="System capacity" value={`${result.solar_potential.estimated_capacity_kw} kW`} />
+              <Stat label="Annual generation" value={`${result.solar_potential.annual_generation_kwh} kWh`} />
+              <Stat label="Annual savings" value={`₹${result.solar_potential.annual_savings_rs}`} accent />
+              <Stat label="CO₂ reduction / year" value={`${result.solar_potential.annual_co2_reduction_kg} kg`} accent />
+            </div>
+          </div>
+
+          <div className="card">
+            <h2>AI Sustainability Report</h2>
+            <p className="report-text">{result.ai_report}</p>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, accent }) {
+  return (
+    <div className="stat">
+      <span className="stat-label">{label}</span>
+      <span className={`stat-value ${accent ? "accent" : ""}`}>{value}</span>
+    </div>
+  );
+}

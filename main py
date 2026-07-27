@@ -1,0 +1,78 @@
+"""
+main.py — SOLAR-IQ backend entrypoint
+
+Run locally:
+    uvicorn main:app --reload --port 8000
+
+Endpoints:
+    GET  /health           -> liveness check
+    POST /analyze           -> full pipeline (roof detection -> solar calc -> AI report)
+"""
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from roof_detection import estimate_roof_area
+from solar_calc import calculate_solar_potential
+from report_gen import generate_report
+
+app = FastAPI(title="SOLAR-IQ API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # tighten before production deployment
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/analyze")
+async def analyze_roof(
+    image: UploadFile = File(...),
+    latitude: float = Form(...),
+    longitude: float = Form(...),
+    known_edge_length_m: float | None = Form(None),
+    tariff_rs_per_kwh: float | None = Form(None),
+):
+    if image.content_type not in ("image/jpeg", "image/png", "image/jpg"):
+        raise HTTPException(400, "Please upload a JPG or PNG image.")
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(400, "Uploaded file is empty.")
+
+    try:
+        roof_data = estimate_roof_area(image_bytes, known_edge_length_m)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    if roof_data["usable_roof_area_m2"] <= 0:
+        raise HTTPException(
+            422, "Could not detect a usable roof area in this image. "
+                 "Try a clearer top-down or angled photo of the roof."
+        )
+
+    solar_data = calculate_solar_potential(
+        usable_area_m2=roof_data["usable_roof_area_m2"],
+        lat=latitude,
+        lon=longitude,
+        tariff_rs_per_kwh=tariff_rs_per_kwh,
+    )
+
+    report_text = generate_report(roof_data, solar_data)
+
+    return {
+        "roof_analysis": roof_data,
+        "solar_potential": solar_data,
+        "ai_report": report_text,
+    }

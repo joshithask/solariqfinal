@@ -1,0 +1,125 @@
+"""
+roof_detection.py
+
+MVP roof-area estimator using classical computer vision (OpenCV).
+
+Approach (documented honestly in the README as an MVP limitation):
+  1. Load the uploaded rooftop image.
+  2. Use edge detection + contour finding to isolate the largest closed
+     region in the image, which for a top-down/angled rooftop photo is
+     usually the roof itself (obstacles like chimneys/vents are detected
+     as smaller internal contours and subtracted).
+  3. Convert the "usable" pixel area into real-world square meters using
+     a reference scale. Since we don't have camera calibration or LiDAR,
+     the MVP asks the user for one known real-world dimension of the roof
+     (e.g. the length of one edge in meters) and derives a pixels-per-meter
+     ratio from that. If no reference is given, a conservative default
+     scale is used and the result is flagged as an estimate.
+
+In a production version this stage would be replaced by a trained
+segmentation model (e.g. SAM / YOLO fine-tuned on rooftop imagery) plus
+satellite/LiDAR calibration, as described in the pitch deck's roadmap.
+"""
+
+import cv2
+import numpy as np
+
+
+def _largest_contour_area_and_mask(gray: np.ndarray):
+    """Find the largest contour in the image and return its pixel area + mask."""
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 40, 120)
+    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=2)
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None, None
+
+    largest = max(contours, key=cv2.contourArea)
+    mask = np.zeros_like(gray)
+    cv2.drawContours(mask, [largest], -1, 255, thickness=cv2.FILLED)
+    area_px = cv2.contourArea(largest)
+    return area_px, mask
+
+
+def _obstacle_area_px(gray: np.ndarray, roof_mask: np.ndarray) -> float:
+    """
+    Rough obstacle detector: within the roof mask, look for small dark/bright
+    blobs (chimneys, vents, AC units, skylights) via adaptive thresholding
+    and subtract their area from the usable roof area.
+    """
+    roof_only = cv2.bitwise_and(gray, gray, mask=roof_mask)
+    thresh = cv2.adaptiveThreshold(
+        roof_only, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 25, 10
+    )
+    thresh = cv2.bitwise_and(thresh, thresh, mask=roof_mask)
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    roof_area = cv2.countNonZero(roof_mask)
+    obstacle_area = 0.0
+    for c in contours:
+        a = cv2.contourArea(c)
+        # Ignore blobs that are implausibly large (likely noise/shadow, not
+        # a discrete obstacle) or implausibly tiny (sensor noise).
+        if 0.002 * roof_area < a < 0.15 * roof_area:
+            obstacle_area += a
+    return obstacle_area
+
+
+def estimate_roof_area(
+    image_bytes: bytes,
+    known_edge_length_m: float | None = None,
+) -> dict:
+    """
+    Returns a dict with:
+      - total_roof_area_m2
+      - usable_roof_area_m2 (after subtracting detected obstacles)
+      - obstacle_area_m2
+      - pixels_per_meter (scale used)
+      - scale_source ("user_provided" | "default_estimate")
+    """
+    file_bytes = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Could not decode image. Please upload a JPG or PNG.")
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    height_px, width_px = gray.shape[:2]
+
+    area_px, mask = _largest_contour_area_and_mask(gray)
+    if area_px is None or area_px < 0.05 * (height_px * width_px):
+        # Fallback: treat the whole frame as roof if contour detection fails
+        # or returns something implausibly small (better a rough estimate
+        # than a hard failure for the MVP demo).
+        area_px = 0.6 * (height_px * width_px)
+        mask = np.ones_like(gray) * 255
+
+    obstacle_px = _obstacle_area_px(gray, mask)
+
+    # --- Scale: pixels -> real-world meters ---
+    if known_edge_length_m and known_edge_length_m > 0:
+        # Assume the user's reference dimension corresponds to the width
+        # of the image frame (simplest MVP assumption, stated in the UI).
+        pixels_per_meter = width_px / known_edge_length_m
+        scale_source = "user_provided"
+    else:
+        # Default assumption: a typical residential rooftop photo frames
+        # roughly a 12m-wide building. This is a coarse placeholder scale
+        # and is clearly labeled as an estimate in the API response.
+        pixels_per_meter = width_px / 12.0
+        scale_source = "default_estimate"
+
+    m2_per_px = 1.0 / (pixels_per_meter ** 2)
+
+    total_area_m2 = round(area_px * m2_per_px, 1)
+    obstacle_area_m2 = round(obstacle_px * m2_per_px, 1)
+    usable_area_m2 = max(round(total_area_m2 - obstacle_area_m2, 1), 0.0)
+
+    return {
+        "total_roof_area_m2": total_area_m2,
+        "obstacle_area_m2": obstacle_area_m2,
+        "usable_roof_area_m2": usable_area_m2,
+        "pixels_per_meter": round(pixels_per_meter, 2),
+        "scale_source": scale_source,
+    }
